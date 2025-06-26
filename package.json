@@ -1,0 +1,50 @@
+{
+  "name": "PDFDen back end",
+  "version": "1.1.0",
+  "description": "PDFthen App",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server",
+    "server": "nodemon server",
+    "client": "npm start --prefix client",
+    "dev": "concurrently \"npm run server \" \"npm run client\" "
+  },
+  "author": "James, William",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^6.0.1",
+    "bcryptjs": "^2.4.3",
+    "check-disk-space": "^3.4.0",
+    "config": "^3.3.3",
+    "cors": "^2.8.5",
+    "docx-pdf": "^0.0.1",
+    "docxtemplater": "^3.42.4",
+    "express": "^4.17.1",
+    "express-validator": "^6.9.2",
+    "fast-speedtest-api": "^0.3.2",
+    "fs-extra": "^11.2.0",
+    "gravatar": "^1.8.1",
+    "jsonwebtoken": "^8.5.1",
+    "libreoffice-convert": "^1.5.1",
+    "link-speed": "^1.0.0",
+    "mongoose": "^5.11.17",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "os-utils": "^0.0.14",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pptxgenjs": "^3.12.0",
+    "python-shell": "^5.0.0",
+    "request": "^2.88.2",
+    "socket.io": "^4.7.4",
+    "speed-test": "^3.0.0",
+    "start": "^5.1.0",
+    "systeminformation": "^5.21.24",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "concurrently": "^5.3.0",
+    "nodemon": "^2.0.7"
+  }
+}
