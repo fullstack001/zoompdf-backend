@@ -18,7 +18,10 @@ const compressFiles = require("../../controller/express-pdf");
 const pdfToPpt = require("../../controller/pdf-ppt");
 const pptToPdf = require("../../controller/ppt-pdf");
 const pdfToExcel = require("../../controller/pdf-excel");
-const pdfToJpg = require("../../controller/pdf-jpg")
+const pdfToJpg = require("../../controller/pdf-jpg");
+const pdfToPng = require("../../controller/pdf-png");
+const pdfToEpub = require("../../controller/pdf-epub");
+const epubToPdf = require("../../controller/epub-pdf");
 const excelToPdf = require("../../controller/excel-pdf");
 const jpgToPdf = require("../../controller/jpg-pdf");
 const protectPdf = require("../../controller/protect-pdf");
@@ -29,82 +32,195 @@ const auth = require("../../middleware/auth");
 const Pdf = require("../../models/Pdf");
 const Clients = require("../../models/Clients");
 const Blog = require("../../models/Blog");
+const ProcessingFile = require("../../models/ProcessingFile");
 
-// Set up Multer storage configuration
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    // Define the destination directory where uploaded files will be stored
-    cb(null, "uploads/");
-  },
-  filename: function (req, file, cb) {
-    // Define the filename of the uploaded file
-    cb(null, uuidv4() + ".pdf");
-  },
-});
+// ==================== MULTER CONFIGURATIONS ====================
+const createMulterStorage = (destination, fileExtension) => {
+  return multer.diskStorage({
+    destination: (req, file, cb) => cb(null, destination),
+    filename: (req, file, cb) => {
+      const extension = fileExtension || path.extname(file.originalname);
+      cb(null, file.originalname);
+    }
+  });
+};
 
-// Create a Multer instance with the configured storage
-const upload = multer({ storage: storage });
+const storage = createMulterStorage("uploads/", ".pdf");
+const storage1 = createMulterStorage("uploads/", ".zip");
+const storage2 = createMulterStorage("temp_uploads/", ".pdf");
+const storage3 = createMulterStorage("temp_uploads/", ".docx");
+const storage4 = createMulterStorage("temp_uploads/", (req, file) => "." + file.mimetype.split("/")[1]);
 
-// Set up Multer storage configuration(splited files)
-const storage1 = multer.diskStorage({
-  destination: function (req, file, cb) {
-    // Define the destination directory where uploaded files will be stored
-    cb(null, "uploads/");
-  },
-  filename: function (req, file, cb) {
-    // Define the filename of the uploaded file
-    cb(null, uuidv4() + ".zip");
-  },
-});
-
-// Create a Multer instance with the configured storage(splited pdf)
+const upload = multer({ storage });
 const upload1 = multer({ storage: storage1 });
-
-const storage2 = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "temp_uploads/"); // Destination folder for uploaded files
-  },
-  filename: function (req, file, cb) {
-    // Rename the file - you can customize this as needed
-    cb(null, uuidv4() + ".pdf");
-  },
-});
-
 const upload2 = multer({ storage: storage2 });
-
-const storage3 = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "temp_uploads/"); // Destination folder for uploaded files
-  },
-  filename: function (req, file, cb) {
-    // Rename the file - you can customize this as needed
-    cb(null, uuidv4() + ".docx");
-  },
-});
 const upload3 = multer({ storage: storage3 });
-
-const storage4 = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/"); // Destination folder for uploaded files
-  },
-  filename: function (req, file, cb) {
-    // Rename the file - you can customize this as needed
-    cb(null, uuidv4() + ".png");
-  },
-});
 const upload4 = multer({ storage: storage4 });
 
-//upload megered PDF
+// ==================== UTILITY FUNCTIONS ====================
+const fileUtils = {
+  /**
+   * Clean up temporary files and directories
+   */
+  cleanupTempFiles: (outfiles, tempDirs, originFilePaths) => {
+    try {
+      outfiles.forEach(file => {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+      });
+
+      tempDirs.forEach(dir => {
+        if (fs.existsSync(dir)) fsExtra.removeSync(dir);
+      });
+
+      originFilePaths.forEach(pdfPath => {
+        if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+      });
+
+      console.log("Temporary files and folders deleted successfully.");
+    } catch (err) {
+      console.error("Error during cleanup:", err);
+    }
+  },
+
+  /**
+   * Clean up temp_uploads directory
+   */
+  cleanupTempUploads: () => {
+    const directoryPath = "./temp_uploads/";
+    fs.readdir(directoryPath, (err, files) => {
+      if (err) {
+        console.error("Error reading directory:", err);
+        return;
+      }
+
+      files.forEach(file => {
+        const filePath = path.join(directoryPath, file);
+        fs.unlink(filePath, err => {
+          if (err) {
+            console.error(`Error deleting file ${file}:`, err);
+          }
+        });
+      });
+    });
+  },
+
+  /**
+   * Delete original uploaded files
+   */
+  deleteOriginalFiles: async (files) => {
+    for (const file of files) {
+      try {
+        fs.unlinkSync(`./temp_uploads/${file.filename}`);
+        await Pdf.findByIdAndDelete(file._id);
+        console.log(`File ${file.filename} deleted.`);
+      } catch (error) {
+        console.error(`Error deleting file ${file.filename}:`, error);
+      }
+    }
+  },
+
+  /**
+   * Get file size
+   */
+  getFileSize: async (filePath) => {
+    return await fileSize(filePath);
+  }
+};
+
+// ==================== FILE PROCESSING FUNCTIONS ====================
+const fileProcessing = {
+  /**
+   * Handle single file processing
+   */
+  handleSingleFile: async (outfiles, req, res, fileExtension = "pdf") => {
+    const sourcePath = outfiles[0];
+    const uploadedFile = `${req.files[0].originalname?.split(".")[0]}_${Date.now()}.${fileExtension}`;
+    const destinationPath = `./uploads/${uploadedFile}`;
+
+    try {
+      await fileUtils.deleteOriginalFiles(req.files);
+      
+      fs.rename(sourcePath, destinationPath, async (err) => {
+        if (err) {
+          console.error("Error moving file:", err);
+          return res.status(500).send({ error: "Error moving file" });
+        }
+        
+        console.log("File moved successfully!");
+        const newPdf = await Pdf.create({ name: uploadedFile });
+        
+        if (fileExtension === "pdf") {
+          const size = await fileUtils.getFileSize(`./uploads/${uploadedFile}`);
+          res.send({ file: uploadedFile, reSize: size });
+        } else {
+          res.send(uploadedFile);
+        }
+      });
+    } catch (error) {
+      console.error("Error in single file processing:", error);
+      res.status(500).send({ error: "Error processing file" });
+    }
+  },
+
+  /**
+   * Handle multiple files processing with ZIP creation
+   */
+  handleMultipleFiles: async (outfiles, req, res, fileExtension = "pdf") => {
+    const parentDirectory = path.join(__dirname, "../../uploads/");
+    const uploadedZip = `${req.files[0].originalname?.split(".")[0]}_${Date.now()}.zip`;
+    const zipFileName = path.join(parentDirectory, uploadedZip);
+    
+    const output = fs.createWriteStream(zipFileName);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+
+    output.on("close", async () => {
+      fileUtils.cleanupTempUploads();
+      const newPdf = await Pdf.create({ name: uploadedZip });
+      
+      if (fileExtension === "pdf") {
+        const size = await fileUtils.getFileSize(`./uploads/${uploadedZip}`);
+        res.send({ file: uploadedZip, reSize: size });
+      } else {
+        res.send(uploadedZip);
+      }
+    });
+
+    archive.on("error", (err) => {
+      res.status(500).send({ error: `Error creating zip: ${err}` });
+    });
+
+    archive.pipe(output);
+
+    outfiles.forEach((file, index) => {
+      const fileName = `${req.files[index].originalname.split(".")[0]}.${fileExtension}`;
+      archive.file(file, { name: fileName });
+    });
+
+    await archive.finalize();
+  },
+
+  /**
+   * Process files and handle single/multiple file scenarios
+   */
+  processFiles: async (outfiles, req, res, fileExtension = "pdf") => {
+    if (outfiles.length > 1) {
+      await fileProcessing.handleMultipleFiles(outfiles, req, res, fileExtension);
+    } else {
+      await fileProcessing.handleSingleFile(outfiles, req, res, fileExtension);
+    }
+  }
+};
+
+// ==================== PDF UPLOAD ENDPOINTS ====================
 router.post("/pdf_upload", upload.single("pdf"), async (req, res) => {
   try {
     const uploadedFile = req.file;
-    const newPdf = await Pdf.create({ name: uploadedFile.filename });
-
+    
     if (!uploadedFile) {
       return res.status(400).send("No file uploaded");
     }
 
-    // Process the uploaded PDF file here (e.g., save it, manipulate it, etc.)
+    await Pdf.create({ name: uploadedFile.filename });
     res.status(200).send(uploadedFile.filename);
   } catch (error) {
     console.error("error: " + error);
@@ -112,22 +228,22 @@ router.post("/pdf_upload", upload.single("pdf"), async (req, res) => {
   }
 });
 
-//upload edited_pdf_upload
 router.post("/edited_pdf_upload", upload.single("files"), async (req, res) => {
   try {
     const uploadedFile = req.file;
-    const newPdf = await Pdf.create({ name: uploadedFile.filename });
-
+    
     if (!uploadedFile) {
       return res.status(400).send("No file uploaded");
     }
+
+    await Pdf.create({ name: uploadedFile.filename });
+    
     const deletes = req.body.deletes;
     const files = deletes.split(",");
     console.log(files);
 
-    files.forEach((file) => {
+    files.forEach(file => {
       const filePath = path.join("./uploads/", file);
-
       fs.unlink(filePath, (err) => {
         if (err) {
           console.error(`Error deleting file ${file}:`, err);
@@ -137,7 +253,6 @@ router.post("/edited_pdf_upload", upload.single("files"), async (req, res) => {
       });
     });
 
-    // Process the uploaded PDF file here (e.g., save it, manipulate it, etc.)
     res.status(200).send(uploadedFile.filename);
   } catch (error) {
     console.error(error);
@@ -145,12 +260,9 @@ router.post("/edited_pdf_upload", upload.single("files"), async (req, res) => {
   }
 });
 
-//upload png files
 router.post("/png_upload", upload4.array("files"), async (req, res) => {
   try {
-    let files = req.files;
-
-    // Process the uploaded PDF file here (e.g., save it, manipulate it, etc.)
+    const files = req.files;
     res.status(200).send(files);
   } catch (error) {
     console.error(error);
@@ -158,14 +270,88 @@ router.post("/png_upload", upload4.array("files"), async (req, res) => {
   }
 });
 
-//delete  pdf files
+router.post("/zip_upload", upload1.single("file"), async (req, res) => {
+  try {
+    const uploadedFile = req.file;
+    
+    if (!uploadedFile) {
+      return res.status(400).send("No file uploaded");
+    }
+    
+    await Pdf.create({ name: uploadedFile.filename });
+    res.status(200).send(uploadedFile.filename);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send("Error processing file");
+  }
+});
+
+// ==================== EDIT SIGN PDF ENDPOINT ====================
+router.post("/edit-sign-upload", upload2.single("file"), async (req, res) => {
+  try {
+    const uploadedFile = req.file;
+    const { action, email, isSign } = req.body;
+    
+    // Validate required fields
+    if (!uploadedFile) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+    
+    if (!action ) {
+      return res.status(400).json({ 
+        error: "Missing required fields: action is required" 
+      });
+    } 
+    
+    
+    // Create ProcessingFile record
+    const processingFile = await ProcessingFile.create({
+      email: email,
+      filename: uploadedFile.filename,
+      originFile: uploadedFile.path,
+      action: action,
+      isSign: isSign,
+      status: 'pending'
+    });
+    
+    console.log(`Processing file created: ${processingFile._id}`);
+    
+    res.status(200).json({
+      message: "File uploaded successfully and queued for processing",
+      processingId: processingFile._id,
+      filename: uploadedFile.filename,
+      status: 'pending'
+    });
+    
+  } catch (error) {
+    console.error("Error in edit-sign-pdf endpoint:", error);
+    
+    // Clean up uploaded file if database save failed
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupError) {
+        console.error("Error cleaning up uploaded file:", cleanupError);
+      }
+    }
+    
+    res.status(500).json({ 
+      error: "Error processing file upload",
+      details: error.message 
+    });
+  }
+});
+
+// ==================== FILE MANAGEMENT ENDPOINTS ====================
 router.get("/delete/:file", (req, res) => {
   console.log(req.params.file);
-  const filePath = `uploads/${req.params.file}`; // Replace this with the path to your file
+  const filePath = `uploads/${req.params.file}`;
+  
   fs.unlink(filePath, (err) => {
     if (err) {
-      res.status(500).send(err);
+      return res.status(500).send(err);
     }
+    
     Clients.findOne({ file: req.params.file }).then((clients) => {
       clients.deleted = true;
       clients.save();
@@ -178,27 +364,17 @@ router.get("/delete/:file", (req, res) => {
   });
 });
 
-//upload splited pdf's Zip
-router.post("/zip_upload", upload1.single("file"), async (req, res) => {
-  try {
-    const uploadedFile = req.file;
-    const newPdf = await Pdf.create({ name: uploadedFile.filename });
-
-    if (!uploadedFile) {
-      return res.status(400).send("No file uploaded");
-    }
-    // Process the uploaded PDF file here (e.g., save it, manipulate it, etc.)
-    res.status(200).send(uploadedFile.filename);
-  } catch (error) {
-    console.error(error);
-    res.status(500).send("Error processing file");
-  }
-});
-
-// Endpoint for file download
-router.get("/download/:fileName", (req, res) => {
-  const fileName = req.params.fileName;
-  const filePath = `./uploads/${fileName}`; // Path to the file to be downloaded
+router.post("/download", auth, async (req, res) => {
+  const { fileName, action, user } = req.body;
+  console.log(req.body);
+  
+  await Pdf.findOneAndUpdate(
+    { name: fileName }, 
+    { user: user, action: action }, 
+    { new: true }
+  );
+  
+  const filePath = `./uploads/${fileName}`;
 
   res.download(filePath, fileName, (err) => {
     if (err) {
@@ -208,337 +384,122 @@ router.get("/download/:fileName", (req, res) => {
   });
 });
 
-//get file name from DB
-router.post("/get_from_db", async (req, res) => {
-  console.log(req.body.name);
-  await Pdf.findOne({ name: req.body.name })
-    .then((data) => {
-      res.status(200).send(data);
-    })
-    .catch((err) => res.status(500).send("File not found"));
+router.delete("/delete-by-filename/:fileName", auth, async (req, res) => {
+  const fileName = req.params.fileName;
+  fs.unlinkSync(`./uploads/${fileName}`);
+  await Pdf.findOneAndDelete({ name: fileName });
+  res.status(200).send("File deleted successfully");
 });
 
-//get file updated time
+router.get("/files", auth, async (req, res) => {
+  try {
+    const responseUser = req.user.user;
+    console.log(responseUser);
+
+    if (responseUser.isAdmin) {
+      const allFiles = await Pdf.find();
+      return res.status(200).send(allFiles);
+    } else {
+      const userFiles = await Pdf.find({ user: responseUser.id });
+      return res.status(200).send(userFiles);
+    }
+  } catch (err) {
+    console.error("Error fetching files:", err);
+    return res.status(500).send("Server Error");
+  }
+});
+
 router.get("/time/:name", async (req, res) => {
   console.log(req.params.name);
-  await Pdf.findOne({ name: req.params.name })
-    .then((data) => {
-      res.status(200).send(data.uploadTime);
-    })
-    .catch((err) => res.status(500).send("File not found"));
+  try {
+    const data = await Pdf.findOne({ name: req.params.name });
+    res.status(200).send(data.uploadTime);
+  } catch (err) {
+    res.status(500).send("File not found");
+  }
 });
 
-//Endpoint for split_files
+// ==================== PDF SPLIT ENDPOINT ====================
 router.post("/pdf_split", upload2.single("file"), async (req, res) => {
-  let items = JSON.parse(req.body.items);
-  let merge_flag = items.merge_flag;
-  let pages = items.pages;
-  file = req.file;
-  const data = await fs.promises.readFile(`temp_uploads/${file.filename}`);
-  const readPdf = await PDFDocument.load(data);
-  splitPdf(readPdf, pages, merge_flag, file.filename).then((outFiles) => {
-    compressFiles(outFiles, 100)
-      .then((outfiles) => {
-        if (outfiles.length > 1) {
-          const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-          const directoryPath = "./temp_uploads/"; // temp_directory
-          // Create a zip file in the parent directory
-          const uploaded_zip = `${Date.now()}.zip`;
-          const zipFileName = path.join(parentDirectory, uploaded_zip);
-          const output = fs.createWriteStream(zipFileName);
-          const archive = archiver("zip", {
-            zlib: { level: 9 }, // Compression level (0-9)
-          });
-
-          output.on("close", () => {
-            fs.readdir(directoryPath, (err, files) => {
-              if (err) {
-                console.error("Error reading directory:", err);
-                return;
-              }
-
-              files.forEach((file) => {
-                const filePath = path.join(directoryPath, file);
-
-                fs.unlink(filePath, (err) => {
-                  if (err) {
-                    console.error(`Error deleting file ${file}:`, err);
-                  }
-                });
-              });
-            });
-
-            const newPdf = Pdf.create({ name: uploaded_zip });
-            res.send(uploaded_zip);
-          });
-
-          archive.on("error", (err) => {
-            res.status(500).send({ error: `Error creating zip: ${err}` });
-          });
-
-          archive.pipe(output);
-
-          // Add PDF files to the zip file
-          outfiles.forEach((pdfFile, index) => {
-            archive.file(pdfFile, {
-              name: `${file.originalname.split(".")[0]}_splitted(${index}).pdf`,
-            });
-          });
-
-          archive.finalize();
-        } else {
-          const sourcePath = outfiles[0]; // Replace with the path to the source file
-          const uploaded_pdf = `${Date.now()}.pdf`;
-          const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-          //delete origin file
-
-          fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-          // Move file from source directory to destination directory
-          fs.rename(sourcePath, destinationPath, async (err) => {
-            if (err) {
-              console.error("Error moving file:", err);
-            } else {
-              console.log("File moved successfully!");
-              const newPdf = Pdf.create({ name: uploaded_pdf });
-
-              res.send(uploaded_pdf);
-            }
-          });
-        }
-      })
-      .catch((error) => {
-        console.error(error);
-      });
-  });
+  try {
+    const items = JSON.parse(req.body.items);
+    const { merge_flag, pages } = items;
+    const file = req.file;
+    
+    const data = await fs.promises.readFile(`temp_uploads/${file.filename}`);
+    const readPdf = await PDFDocument.load(data);
+    
+    const outFiles = await splitPdf(readPdf, pages, merge_flag, file.filename);
+    const outfiles = await compressFiles(outFiles, 100);
+    
+    if (outfiles.length > 1) {
+      await fileProcessing.handleMultipleFiles(outfiles, req, res, "split");
+    } else {
+      await fileProcessing.handleSingleFile(outfiles, req, res, "split");
+    }
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error processing PDF split" });
+  }
 });
 
-//Endpoint for express-files
-router.post("/pdf_compress", upload2.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  let level = req.body.level;
-  let files = req.files;
-  let names = files.map((file) => {
-    return file.filename;
-  });
-  compressFiles(names, level)
-    .then((outfiles) => {
-      if (outfiles.length > 1) {
-        const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-        const directoryPath = "./temp_uploads/"; // temp_directory
-        // Create a zip file in the parent directory
-        const uploaded_zip = `${Date.now()}.zip`;
-        const zipFileName = path.join(parentDirectory, uploaded_zip);
-        const output = fs.createWriteStream(zipFileName);
-        const archive = archiver("zip", {
-          zlib: { level: 9 }, // Compression level (0-9)
-        });
-
-        output.on("close", () => {
-          fs.readdir(directoryPath, (err, files) => {
-            if (err) {
-              console.error("Error reading directory:", err);
-              return;
-            }
-
-            files.forEach((file) => {
-              const filePath = path.join(directoryPath, file);
-
-              fs.unlink(filePath, (err) => {
-                if (err) {
-                  console.error(`Error deleting file ${file}:`, err);
-                }
-              });
-            });
-          });
-
-          const newPdf = Pdf.create({ name: uploaded_zip });
-          fileSize(`./uploads/${uploaded_zip}`).then((size) => {
-            console.log(size);
-            res.send({ file: uploaded_zip, reSize: size });
-          });
-        });
-
-        archive.on("error", (err) => {
-          res.status(500).send({ error: `Error creating zip: ${err}` });
-        });
-
-        archive.pipe(output);
-
-        // Add PDF files to the zip file
-        outfiles.forEach((pdfFile, index) => {
-          archive.file(pdfFile, {
-            name: `${files[index].originalname.split(".")[0]}_compressed.pdf`,
-          });
-        });
-
-        archive.finalize();
-      } else {
-        const sourcePath = outfiles[0]; // Replace with the path to the source file
-        const uploaded_pdf = `${Date.now()}.pdf`;
-        const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-        //delete origin file
-        files.forEach(async (file) => {
-          try {
-            // Delete file from storage (assuming files are stored in a directory)
-            fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-            // Delete file from the database
-            await Pdf.findByIdAndDelete(file._id);
-            console.log(`File ${file.filename} deleted.`);
-          } catch (error) {
-            console.error(`Error deleting file ${file.filename}:`, error);
-          }
-        });
-
-        // Move file from source directory to destination directory
-        fs.rename(sourcePath, destinationPath, async (err) => {
-          if (err) {
-            console.error("Error moving file:", err);
-          } else {
-            console.log("File moved successfully!");
-            const newPdf = Pdf.create({ name: uploaded_pdf });
-            fileSize(`./uploads/${uploaded_pdf}`).then((size) => {
-              console.log(size);
-              res.send({ file: uploaded_pdf, reSize: size });
-            });
-          }
-        });
-      }
-    })
-    .catch((error) => {
-      console.error(error);
-    });
+// ==================== PDF COMPRESSION ENDPOINT ====================
+router.post("/compress_pdf", upload2.array("files"), async (req, res) => {
+  try {
+    const level = req.body.level || 100;
+    const files = req.files;
+    const names = files.map(file => file.filename);
+    
+    const outfiles = await compressFiles(names, level);
+    await fileProcessing.processFiles(outfiles, req, res, "pdf");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error compressing PDF" });
+  }
 });
 
+// ==================== PDF PROTECTION ENDPOINT ====================
 router.post("/protect_pdf", upload2.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  let password = req.body.password;
-  let files = req.files;
-
-  protectPdf(files, password)
-    .then((outfiles) => {
-      if (outfiles.length > 1) {
-        const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-        const directoryPath = "./temp_uploads/"; // temp_directory
-        // Create a zip file in the parent directory
-        const uploaded_zip = `${Date.now()}.zip`;
-        const zipFileName = path.join(parentDirectory, uploaded_zip);
-        const output = fs.createWriteStream(zipFileName);
-        const archive = archiver("zip", {
-          zlib: { level: 9 }, // Compression level (0-9)
-        });
-
-        output.on("close", () => {
-          fs.readdir(directoryPath, (err, files) => {
-            if (err) {
-              console.error("Error reading directory:", err);
-              return;
-            }
-
-            files.forEach((file) => {
-              const filePath = path.join(directoryPath, file);
-
-              fs.unlink(filePath, (err) => {
-                if (err) {
-                  console.error(`Error deleting file ${file}:`, err);
-                }
-              });
-            });
-          });
-
-          const newPdf = Pdf.create({ name: uploaded_zip });
-          fileSize(`./uploads/${uploaded_zip}`).then((size) => {
-            console.log(size);
-            res.send({ file: uploaded_zip, reSize: size });
-          });
-        });
-
-        archive.on("error", (err) => {
-          res.status(500).send({ error: `Error creating zip: ${err}` });
-        });
-
-        archive.pipe(output);
-
-        // Add PDF files to the zip file
-        outfiles.forEach((pdfFile, index) => {
-          archive.file(pdfFile, {
-            name: `${files[index].originalname.split(".")[0]}_compressed.pdf`,
-          });
-        });
-
-        archive.finalize();
-      } else {
-        const sourcePath = outfiles[0]; // Replace with the path to the source file
-        const uploaded_pdf = `${Date.now()}.pdf`;
-        const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-        //delete origin file
-        files.forEach(async (file) => {
-          try {
-            // Delete file from storage (assuming files are stored in a directory)
-            fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-            // Delete file from the database
-            await Pdf.findByIdAndDelete(file._id);
-            console.log(`File ${file.filename} deleted.`);
-          } catch (error) {
-            console.error(`Error deleting file ${file.filename}:`, error);
-          }
-        });
-
-        // Move file from source directory to destination directory
-        fs.rename(sourcePath, destinationPath, async (err) => {
-          if (err) {
-            console.error("Error moving file:", err);
-          } else {
-            console.log("File moved successfully!");
-            const newPdf = Pdf.create({ name: uploaded_pdf });
-            fileSize(`./uploads/${uploaded_pdf}`).then((size) => {
-              console.log(size);
-              res.send({ file: uploaded_pdf, reSize: size });
-            });
-          }
-        });
-      }
-    })
-    .catch((error) => {
-      console.error(error);
-    });
+  try {
+    const password = req.body.password;
+    const files = req.files;
+    
+    const outfiles = await protectPdf(files, password);
+    await fileProcessing.processFiles(outfiles, req, res, "pdf");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error protecting PDF" });
+  }
 });
 
+// ==================== PDF UNLOCK ENDPOINT ====================
 router.post("/unlock_pdf", upload2.array("files"), async (req, res) => {
   const files = req.files;
   const password = req.body.password || "";
+  
   try {
-
-    // Call unlockPdf and handle output
     const outfile = await unlockPdf(files[0], password);
-
     const sourcePath = outfile;
-    const uploaded_pdf = `${Date.now()}.pdf`;
-    const destinationPath = `./uploads/${uploaded_pdf}`;
+    const uploadedPdf = `${req.files[0].originalname?.split(".")[0]}_${Date.now()}.pdf`;
+    const destinationPath = `./uploads/${uploadedPdf}`;
 
-    // Move the unlocked PDF to the final destination
     fs.rename(sourcePath, destinationPath, async (err) => {
       if (err) {
         console.error("Error moving file:", err);
-        res.status(500).send({ error: "Error moving unlocked PDF." });
-        return;
+        return res.status(500).send({ error: "Error moving unlocked PDF." });
       }
 
       try {
-        // Delete original files
         await Promise.all(
           files.map(async (file) => {
             const tempFilePath = `./temp_uploads/${file.filename}`;
             await fs.promises.unlink(tempFilePath);
-
           })
         );
 
-        const newPdf = await Pdf.create({ name: uploaded_pdf });
-        const size = await fileSize(`./uploads/${uploaded_pdf}`);
-        res.send({ file: uploaded_pdf, reSize: size });
+        const newPdf = await Pdf.create({ name: uploadedPdf });
+        const size = await fileUtils.getFileSize(`./uploads/${uploadedPdf}`);
+        res.send({ file: uploadedPdf, reSize: size });
       } catch (err) {
         console.error("Error cleaning up files or saving metadata:", err);
         res.status(500).send({
@@ -546,10 +507,8 @@ router.post("/unlock_pdf", upload2.array("files"), async (req, res) => {
         });
       }
     });
-
   } catch (error) {
     try {
-      // Clean up temporary files
       if (files && files[0] && files[0].filename) {
         const tempFilePath = `./temp_uploads/${files[0].filename}`;
         await fs.promises.unlink(tempFilePath);
@@ -566,119 +525,76 @@ router.post("/unlock_pdf", upload2.array("files"), async (req, res) => {
 });
 
 
-router.post("/pdf-to-jpg", upload2.array("files"), async (req, res) => {
+
+// ==================== PDF TO IMAGE CONVERSION ENDPOINTS ====================
+router.post("/pdf_to_jpg", upload2.array("files"), async (req, res) => {
   try {
     const level = req.body.level || "page";
     const files = req.files;
-
-    if (!files || files.length === 0) {
-      return res.status(400).send({ error: "No files uploaded." });
-    }
-
-    const tempUploadDir = path.join(__dirname, "../../temp_uploads");
-    const uploadsDir = path.join(__dirname, "../../uploads");
-
-    // Ensure necessary directories exist
-    fs.mkdirSync(uploadsDir, { recursive: true });
-
-    // Extract filenames from uploaded files
-    const fileNames = files.map((file) => file.filename);
-    const originFilePaths = files.map((file) =>
-      path.join(tempUploadDir, file.filename)
-    );
-
-    // Process PDFs and convert them to JPG
+    const fileNames = files.map(file => file.filename);
+    
     const { outfiles, tempDirs } = await pdfToJpg(fileNames, level);
-
+    
     if (outfiles.length > 1) {
-      // Create ZIP for multiple JPG files
-      const uploadedZip = `${Date.now()}.zip`;
-      const zipFilePath = path.join(uploadsDir, uploadedZip);
-
-      const output = fs.createWriteStream(zipFilePath);
+      const uploadedZip = `${files[0].originalname?.split(".")[0]}_${Date.now()}.zip`;
+      const zipFileName = path.join(__dirname, "../../uploads/", uploadedZip);
+      
+      const output = fs.createWriteStream(zipFileName);
       const archive = archiver("zip", { zlib: { level: 9 } });
 
       output.on("close", async () => {
-        console.log(`Archive created: ${uploadedZip}`);
-
-        // Cleanup temporary files and folders
-        cleanupTempFiles(outfiles, tempDirs, originFilePaths);
-
+        fileUtils.cleanupTempFiles(outfiles, tempDirs, []);
         await Pdf.create({ name: uploadedZip });
-        return res.send({ file: uploadedZip });
+        res.send(uploadedZip);
       });
 
       archive.on("error", (err) => {
-        console.error("Error creating zip:", err);
-        return res.status(500).send({ error: "Error creating ZIP file." });
+        res.status(500).send({ error: `Error creating zip: ${err}` });
       });
 
       archive.pipe(output);
 
-      // Add JPG files to the ZIP
-      outfiles.forEach((jpgFile, index) => {
-        archive.file(jpgFile, { name: `pdfden_convert_${index}.jpg` });
+      outfiles.forEach((file, index) => {
+        const fileName = `pdfden_convert_${index}.jpg`;
+        archive.file(file, { name: fileName });
       });
 
       await archive.finalize();
     } else {
-      // Single file: move to uploads
       const sourcePath = outfiles[0];
-      const uploadedJpg = `${Date.now()}.jpg`;
-      const destinationPath = path.join(uploadsDir, uploadedJpg);
+      const uploadedJpg = `${files[0].originalname?.split(".")[0]}_${Date.now()}.jpg`;
+      const destinationPath = path.join(__dirname, "../../uploads/", uploadedJpg);
 
       fs.renameSync(sourcePath, destinationPath);
-
-      // Cleanup temporary files and folders
-      cleanupTempFiles(outfiles, tempDirs, originFilePaths);
+      fileUtils.cleanupTempFiles(outfiles, tempDirs, []);
 
       await Pdf.create({ name: uploadedJpg });
-      return res.send({ file: uploadedJpg });
+      res.send(uploadedJpg);
     }
   } catch (error) {
-    console.error("Error processing PDF files:", error);
-    return res.status(500).send({ error: "Internal Server Error" });
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to JPG" });
   }
 });
 
-router.post("/powerpoint-to-pdf", upload3.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  let degree = req.body.degrees.split(",");
-  let files = req.files;
-  pptToPdf(files, degree).then((outfiles) => {
+router.post("/pdf_to_png", upload2.array("files"), async (req, res) => {
+  try {
+    const files = req.files;
+    const fileNames = files.map(file => file.filename);
+    
+    const { outfiles, tempDirs } = await pdfToPng(fileNames);
+    
     if (outfiles.length > 1) {
-      const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-      const directoryPath = "./temp_uploads/"; // temp_directory
-      // Create a zip file in the parent directory
-      const uploaded_zip = `${Date.now()}.zip`;
-      const zipFileName = path.join(parentDirectory, uploaded_zip);
+      const uploadedZip = `${files[0].originalname?.split(".")[0]}_${Date.now()}.zip`;
+      const zipFileName = path.join(__dirname, "../../uploads/", uploadedZip);
+      
       const output = fs.createWriteStream(zipFileName);
-      const archive = archiver("zip", {
-        zlib: { level: 9 }, // Compression level (0-9)
-      });
+      const archive = archiver("zip", { zlib: { level: 9 } });
 
-      output.on("close", () => {
-        fs.readdir(directoryPath, (err, files) => {
-          if (err) {
-            console.error("Error reading directory:", err);
-            return;
-          }
-
-          files.forEach((file) => {
-            const filePath = path.join(directoryPath, file);
-
-            fs.unlink(filePath, (err) => {
-              if (err) {
-                console.error(`Error deleting file ${file}:`, err);
-              }
-              // else {
-              //   console.log(`Deleted file: ${file}`);
-              // }
-            });
-          });
-        });
-        const newPdf = Pdf.create({ name: uploaded_zip });
-        res.send(uploaded_zip);
+      output.on("close", async () => {
+        fileUtils.cleanupTempFiles(outfiles, tempDirs, []);
+        await Pdf.create({ name: uploadedZip });
+        res.send(uploadedZip);
       });
 
       archive.on("error", (err) => {
@@ -687,606 +603,165 @@ router.post("/powerpoint-to-pdf", upload3.array("files"), async (req, res) => {
 
       archive.pipe(output);
 
-      // Add PDF files to the zip file
-      outfiles.forEach((pdfFile, index) => {
-        archive.file(pdfFile, {
-          name: `${files[index].originalname.split(".")[0]}.pdf`,
-        });
+      outfiles.forEach((file, index) => {
+        const fileName = `pdfden_convert_${index}.png`;
+        archive.file(file, { name: fileName });
       });
 
-      archive.finalize();
+      await archive.finalize();
     } else {
-      const sourcePath = outfiles[0]; // Replace with the path to the source file
-      const uploaded_pdf = `${Date.now()}.pdf`;
-      const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-      //delete origin file
-      files.forEach(async (file) => {
-        try {
-          // Delete file from storage (assuming files are stored in a directory)
-          fs.unlinkSync(`./temp_uploads/${file.filename}`);
+      const sourcePath = outfiles[0];
+      const uploadedPng = `${files[0].originalname?.split(".")[0]}_${Date.now()}.png`;
+      const destinationPath = path.join(__dirname, "../../uploads/", uploadedPng);
 
-          // Delete file from the database
-          await Pdf.findByIdAndDelete(file._id);
-          // console.log(`File ${file.filename} deleted.`);
-        } catch (error) {
-          console.error(`Error deleting file ${file.filename}:`, error);
-        }
-      });
+      fs.renameSync(sourcePath, destinationPath);
+      fileUtils.cleanupTempFiles(outfiles, tempDirs, []);
 
-      // Move file from source directory to destination directory
-      fs.rename(sourcePath, destinationPath, async (err) => {
-        if (err) {
-          console.error("Error moving file:", err);
-        } else {
-          console.log("File moved successfully!");
-          const newPdf = Pdf.create({ name: uploaded_pdf });
-
-          res.send(uploaded_pdf);
-        }
-      });
+      await Pdf.create({ name: uploadedPng });
+      res.send(uploadedPng);
     }
-  });
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to PNG" });
+  }
 });
 
-router.post("/jpg-to-pdf", upload3.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  const { direction, pageSize, margin, merge_selected } = req.body;
-  let files = req.files;
-  jpgToPdf(files, direction, pageSize, margin, merge_selected).then((outfiles) => {
-    if (outfiles.length > 1) {
-      const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-      const directoryPath = "./temp_uploads/"; // temp_directory
-      // Create a zip file in the parent directory
-      const uploaded_zip = `${Date.now()}.zip`;
-      const zipFileName = path.join(parentDirectory, uploaded_zip);
-      const output = fs.createWriteStream(zipFileName);
-      const archive = archiver("zip", {
-        zlib: { level: 9 }, // Compression level (0-9)
-      });
-
-      output.on("close", () => {
-        fs.readdir(directoryPath, (err, files) => {
-          if (err) {
-            console.error("Error reading directory:", err);
-            return;
-          }
-
-          files.forEach((file) => {
-            const filePath = path.join(directoryPath, file);
-
-            fs.unlink(filePath, (err) => {
-              if (err) {
-                console.error(`Error deleting file ${file}:`, err);
-              }
-              // else {
-              //   console.log(`Deleted file: ${file}`);
-              // }
-            });
-          });
-        });
-        const newPdf = Pdf.create({ name: uploaded_zip });
-        res.send(uploaded_zip);
-      });
-
-      archive.on("error", (err) => {
-        res.status(500).send({ error: `Error creating zip: ${err}` });
-      });
-
-      archive.pipe(output);
-
-      // Add PDF files to the zip file
-      outfiles.forEach((pdfFile, index) => {
-        archive.file(pdfFile, {
-          name: `${files[index].originalname.split(".")[0]}.pdf`,
-        });
-      });
-
-      archive.finalize();
-    } else {
-      const sourcePath = outfiles[0]; // Replace with the path to the source file
-      const uploaded_pdf = `${Date.now()}.pdf`;
-      const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-      //delete origin file
-      files.forEach(async (file) => {
-        try {
-          // Delete file from storage (assuming files are stored in a directory)
-          fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-          // Delete file from the database
-          await Pdf.findByIdAndDelete(file._id);
-          // console.log(`File ${file.filename} deleted.`);
-        } catch (error) {
-          console.error(`Error deleting file ${file.filename}:`, error);
-        }
-      });
-
-      // Move file from source directory to destination directory
-      fs.rename(sourcePath, destinationPath, async (err) => {
-        if (err) {
-          console.error("Error moving file:", err);
-        } else {
-          console.log("File moved successfully!");
-          const newPdf = Pdf.create({ name: uploaded_pdf });
-
-          res.send(uploaded_pdf);
-        }
-      });
-    }
-  });
+// ==================== PRESENTATION CONVERSION ENDPOINTS ====================
+router.post("/pptx_to_pdf", upload3.array("files"), async (req, res) => {
+  try {
+    const degree = req.body.degrees.split(",");
+    const files = req.files;
+    
+    const outfiles = await pptToPdf(files, degree);
+    await fileProcessing.processFiles(outfiles, req, res, "pptx");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PPTX to PDF" });
+  }
 });
 
+router.post("/pdf_to_pptx", upload2.array("files"), async (req, res) => {
+  try {
+    const files = req.files;
+    const outfiles = await pdfToPpt(files);
+    await fileProcessing.processFiles(outfiles, req, res, "pptx");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to PPTX" });
+  }
+});
+
+// ==================== IMAGE TO PDF CONVERSION ENDPOINT ====================
+router.post("/jpg_to_pdf", upload4.array("files"), async (req, res) => {
+  try {
+    const { direction, pageSize, margin, merge_selected } = req.body;
+    const files = req.files;
+    console.log(files);
+    
+    const outfiles = await jpgToPdf(files, direction, pageSize, margin, merge_selected);
+    await fileProcessing.processFiles(outfiles, req, res, "pdf");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting JPG to PDF" });
+  }
+});
+
+// ==================== EXCEL CONVERSION ENDPOINTS ====================
 router.post("/excel-to-pdf", upload3.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  let files = req.files;
-  excelToPdf(files).then((outfiles) => {
-    if (outfiles.length > 1) {
-      const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-      const directoryPath = "./temp_uploads/"; // temp_directory
-      // Create a zip file in the parent directory
-      const uploaded_zip = `${Date.now()}.zip`;
-      const zipFileName = path.join(parentDirectory, uploaded_zip);
-      const output = fs.createWriteStream(zipFileName);
-      const archive = archiver("zip", {
-        zlib: { level: 9 }, // Compression level (0-9)
-      });
-
-      output.on("close", () => {
-        fs.readdir(directoryPath, (err, files) => {
-          if (err) {
-            console.error("Error reading directory:", err);
-            return;
-          }
-
-          files.forEach((file) => {
-            const filePath = path.join(directoryPath, file);
-
-            fs.unlink(filePath, (err) => {
-              if (err) {
-                console.error(`Error deleting file ${file}:`, err);
-              }
-              // else {
-              //   console.log(`Deleted file: ${file}`);
-              // }
-            });
-          });
-        });
-        const newPdf = Pdf.create({ name: uploaded_zip });
-        res.send(uploaded_zip);
-      });
-
-      archive.on("error", (err) => {
-        res.status(500).send({ error: `Error creating zip: ${err}` });
-      });
-
-      archive.pipe(output);
-
-      // Add PDF files to the zip file
-      outfiles.forEach((pdfFile, index) => {
-        archive.file(pdfFile, {
-          name: `${files[index].originalname.split(".")[0]}.pdf`,
-        });
-      });
-
-      archive.finalize();
-    } else {
-      const sourcePath = outfiles[0]; // Replace with the path to the source file
-      const uploaded_pdf = `${Date.now()}.pdf`;
-      const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-      //delete origin file
-      files.forEach(async (file) => {
-        try {
-          // Delete file from storage (assuming files are stored in a directory)
-          fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-          // Delete file from the database
-          await Pdf.findByIdAndDelete(file._id);
-          // console.log(`File ${file.filename} deleted.`);
-        } catch (error) {
-          console.error(`Error deleting file ${file.filename}:`, error);
-        }
-      });
-
-      // Move file from source directory to destination directory
-      fs.rename(sourcePath, destinationPath, async (err) => {
-        if (err) {
-          console.error("Error moving file:", err);
-        } else {
-          console.log("File moved successfully!");
-          const newPdf = Pdf.create({ name: uploaded_pdf });
-
-          res.send(uploaded_pdf);
-        }
-      });
-    }
-  });
-});
-
-router.post("/wordtopdf", upload3.array("files"), async (req, res) => {
-  // req.files contains the uploaded files
-  let degree = req.body.degrees.split(",");
-  let files = req.files;
-  console.log(degree);
-  wordToPdf(files, degree).then((outfiles) => {
-    if (outfiles.length > 1) {
-      const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-      const directoryPath = "./temp_uploads/"; // temp_directory
-      // Create a zip file in the parent directory
-      const uploaded_zip = `${Date.now()}.zip`;
-      const zipFileName = path.join(parentDirectory, uploaded_zip);
-      const output = fs.createWriteStream(zipFileName);
-      const archive = archiver("zip", {
-        zlib: { level: 9 }, // Compression level (0-9)
-      });
-
-      output.on("close", () => {
-        fs.readdir(directoryPath, (err, files) => {
-          if (err) {
-            console.error("Error reading directory:", err);
-            return;
-          }
-
-          files.forEach((file) => {
-            const filePath = path.join(directoryPath, file);
-
-            fs.unlink(filePath, (err) => {
-              if (err) {
-                console.error(`Error deleting file ${file}:`, err);
-              }
-              // else {
-              //   console.log(`Deleted file: ${file}`);
-              // }
-            });
-          });
-        });
-        const newPdf = Pdf.create({ name: uploaded_zip });
-        res.send(uploaded_zip);
-      });
-
-      archive.on("error", (err) => {
-        res.status(500).send({ error: `Error creating zip: ${err}` });
-      });
-
-      archive.pipe(output);
-
-      // Add PDF files to the zip file
-      outfiles.forEach((pdfFile, index) => {
-        archive.file(pdfFile, {
-          name: `${files[index].originalname.split(".")[0]}.pdf`,
-        });
-      });
-
-      archive.finalize();
-    } else {
-      const sourcePath = outfiles[0]; // Replace with the path to the source file
-      const uploaded_pdf = `${Date.now()}.pdf`;
-      const destinationPath = `./uploads/${uploaded_pdf}`; // Replace with the path to the destination
-      //delete origin file
-      files.forEach(async (file) => {
-        try {
-          // Delete file from storage (assuming files are stored in a directory)
-          fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-          // Delete file from the database
-          await Pdf.findByIdAndDelete(file._id);
-          // console.log(`File ${file.filename} deleted.`);
-        } catch (error) {
-          console.error(`Error deleting file ${file.filename}:`, error);
-        }
-      });
-
-      // Move file from source directory to destination directory
-      fs.rename(sourcePath, destinationPath, async (err) => {
-        if (err) {
-          console.error("Error moving file:", err);
-        } else {
-          console.log("File moved successfully!");
-          const newPdf = Pdf.create({ name: uploaded_pdf });
-
-          res.send(uploaded_pdf);
-        }
-      });
-    }
-  });
-});
-
-router.post("/pdf_to_powerpoint", upload2.array("files"), async (req, res) => {
-  let files = req.files;
-  pdfToPpt(files)
-    .then((outfiles) => {
-      if (outfiles.length > 1) {
-        const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-        const directoryPath = "./temp_uploads/"; // temp_directory
-        // Create a zip file in the parent directory
-        const uploaded_zip = `${Date.now()}.zip`;
-        const zipFileName = path.join(parentDirectory, uploaded_zip);
-        const output = fs.createWriteStream(zipFileName);
-        const archive = archiver("zip", {
-          zlib: { level: 9 }, // Compression level (0-9)
-        });
-
-        output.on("close", () => {
-          fs.readdir(directoryPath, (err, files) => {
-            if (err) {
-              console.error("Error reading directory:", err);
-              return;
-            }
-
-            files.forEach((file) => {
-              const filePath = path.join(directoryPath, file);
-
-              fs.unlink(filePath, (err) => {
-                if (err) {
-                  console.error(`Error deleting file ${file}:`, err);
-                } else {
-                  console.log(`Deleted file: ${file}`);
-                }
-              });
-            });
-          });
-
-          const newPdf = Pdf.create({ name: uploaded_zip });
-
-          res.send(uploaded_zip);
-        });
-
-        archive.on("error", (err) => {
-          res.status(500).send({ error: `Error creating zip: ${err}` });
-        });
-
-        archive.pipe(output);
-
-        // Add PDF files to the zip file
-        outfiles.forEach((pdfFile, index) => {
-          archive.file(pdfFile, {
-            name: `${files[index].originalname.split(".")[0]}.pptx`,
-          });
-        });
-
-        archive.finalize();
-      } else {
-        const sourcePath = outfiles[0]; // Replace with the path to the source file
-        const uploaded_docx = `${Date.now()}.pptx`;
-        const destinationPath = `./uploads/${uploaded_docx}`; // Replace with the path to the destination
-        //delete origin file
-        files.forEach(async (file) => {
-          try {
-            // Delete file from storage (assuming files are stored in a directory)
-            fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-            // Delete file from the database
-            await Pdf.findByIdAndDelete(file._id);
-            console.log(`File ${file.filename} deleted.`);
-          } catch (error) {
-            console.error(`Error deleting file ${file.filename}:`, error);
-          }
-        });
-
-        // Move file from source directory to destination directory
-        fs.rename(sourcePath, destinationPath, async (err) => {
-          if (err) {
-            console.error("Error moving file:", err);
-          } else {
-            console.log("File moved successfully!");
-            const newPdf = Pdf.create({ name: uploaded_docx });
-
-            res.send(uploaded_docx);
-          }
-        });
-      }
-    })
-    .catch((error) => {
-      console.error(error);
-    });
+  try {
+    const files = req.files;
+    const outfiles = await excelToPdf(files);
+    await fileProcessing.processFiles(outfiles, req, res, "pdf");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting Excel to PDF" });
+  }
 });
 
 router.post("/pdf_to_excel", upload2.array("files"), async (req, res) => {
-  let files = req.files;
-  pdfToExcel(files)
-    .then((outfiles) => {
-      if (outfiles.length > 1) {
-        const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-        const directoryPath = "./temp_uploads/"; // temp_directory
-        // Create a zip file in the parent directory
-        const uploaded_zip = `${Date.now()}.zip`;
-        const zipFileName = path.join(parentDirectory, uploaded_zip);
-        const output = fs.createWriteStream(zipFileName);
-        const archive = archiver("zip", {
-          zlib: { level: 9 }, // Compression level (0-9)
-        });
+  try {
+    const files = req.files;
+    const outfiles = await pdfToExcel(files);
+    await fileProcessing.processFiles(outfiles, req, res, "xlsx");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to Excel" });
+  }
+});
 
-        output.on("close", () => {
-          fs.readdir(directoryPath, (err, files) => {
-            if (err) {
-              console.error("Error reading directory:", err);
-              return;
-            }
-
-            files.forEach((file) => {
-              const filePath = path.join(directoryPath, file);
-
-              fs.unlink(filePath, (err) => {
-                if (err) {
-                  console.error(`Error deleting file ${file}:`, err);
-                } else {
-                  console.log(`Deleted file: ${file}`);
-                }
-              });
-            });
-          });
-
-          const newPdf = Pdf.create({ name: uploaded_zip });
-
-          res.send(uploaded_zip);
-        });
-
-        archive.on("error", (err) => {
-          res.status(500).send({ error: `Error creating zip: ${err}` });
-        });
-
-        archive.pipe(output);
-
-        // Add PDF files to the zip file
-        outfiles.forEach((pdfFile, index) => {
-          archive.file(pdfFile, {
-            name: `${files[index].originalname.split(".")[0]}.xlsx`,
-          });
-        });
-
-        archive.finalize();
-      } else {
-        const sourcePath = outfiles[0]; // Replace with the path to the source file
-        const uploaded_docx = `${Date.now()}.xlsx`;
-        const destinationPath = `./uploads/${uploaded_docx}`; // Replace with the path to the destination
-        //delete origin file
-        files.forEach(async (file) => {
-          try {
-            // Delete file from storage (assuming files are stored in a directory)
-            fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-            // Delete file from the database
-            await Pdf.findByIdAndDelete(file._id);
-            console.log(`File ${file.filename} deleted.`);
-          } catch (error) {
-            console.error(`Error deleting file ${file.filename}:`, error);
-          }
-        });
-
-        // Move file from source directory to destination directory
-        fs.rename(sourcePath, destinationPath, async (err) => {
-          if (err) {
-            console.error("Error moving file:", err);
-          } else {
-            console.log("File moved successfully!");
-            const newPdf = Pdf.create({ name: uploaded_docx });
-
-            res.send(uploaded_docx);
-          }
-        });
-      }
-    })
-    .catch((error) => {
-      console.error(error);
-    });
+// ==================== WORD CONVERSION ENDPOINTS ====================
+router.post("/word_to_pdf", upload3.array("files"), async (req, res) => {
+  try {
+    const files = req.files;
+    const outfiles = await wordToPdf(files, 0);
+    await fileProcessing.processFiles(outfiles, req, res, "docx");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting Word to PDF" });
+  }
 });
 
 router.post("/pdf_to_word", upload2.array("files"), async (req, res) => {
-  let files = req.files;
-  pdfToWord(files)
-    .then((outfiles) => {
-      if (outfiles.length > 1) {
-        const parentDirectory = path.join(__dirname, "../../uploads/"); // Parent directory path
-        const directoryPath = "./temp_uploads/"; // temp_directory
-        // Create a zip file in the parent directory
-        const uploaded_zip = `${Date.now()}.zip`;
-        const zipFileName = path.join(parentDirectory, uploaded_zip);
-        const output = fs.createWriteStream(zipFileName);
-        const archive = archiver("zip", {
-          zlib: { level: 9 }, // Compression level (0-9)
-        });
-
-        output.on("close", () => {
-          fs.readdir(directoryPath, (err, files) => {
-            if (err) {
-              console.error("Error reading directory:", err);
-              return;
-            }
-
-            files.forEach((file) => {
-              const filePath = path.join(directoryPath, file);
-
-              fs.unlink(filePath, (err) => {
-                if (err) {
-                  console.error(`Error deleting file ${file}:`, err);
-                } else {
-                  console.log(`Deleted file: ${file}`);
-                }
-              });
-            });
-          });
-
-          const newPdf = Pdf.create({ name: uploaded_zip });
-
-          res.send(uploaded_zip);
-        });
-
-        archive.on("error", (err) => {
-          res.status(500).send({ error: `Error creating zip: ${err}` });
-        });
-
-        archive.pipe(output);
-
-        // Add PDF files to the zip file
-        outfiles.forEach((pdfFile, index) => {
-          archive.file(pdfFile, {
-            name: `${files[index].originalname.split(".")[0]}.docx`,
-          });
-        });
-
-        archive.finalize();
-      } else {
-        const sourcePath = outfiles[0]; // Replace with the path to the source file
-        const uploaded_docx = `${Date.now()}.docx`;
-        const destinationPath = `./uploads/${uploaded_docx}`; // Replace with the path to the destination
-        //delete origin file
-        files.forEach(async (file) => {
-          try {
-            // Delete file from storage (assuming files are stored in a directory)
-            fs.unlinkSync(`./temp_uploads/${file.filename}`);
-
-            // Delete file from the database
-            await Pdf.findByIdAndDelete(file._id);
-            console.log(`File ${file.filename} deleted.`);
-          } catch (error) {
-            console.error(`Error deleting file ${file.filename}:`, error);
-          }
-        });
-
-        // Move file from source directory to destination directory
-        fs.rename(sourcePath, destinationPath, async (err) => {
-          if (err) {
-            console.error("Error moving file:", err);
-          } else {
-            console.log("File moved successfully!");
-            const newPdf = Pdf.create({ name: uploaded_docx });
-
-            res.send(uploaded_docx);
-          }
-        });
-      }
-    })
-    .catch((error) => {
-      console.error(error);
-    });
+  try {
+    const files = req.files;
+    const outfiles = await pdfToWord(files);
+    await fileProcessing.processFiles(outfiles, req, res, "docx");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to Word" });
+  }
 });
 
+// ==================== EPUB CONVERSION ENDPOINTS ====================
+router.post("/pdf_to_epub", upload2.array("files"), async (req, res) => {
+  try {
+    const files = req.files;
+    const outfiles = await pdfToEpub(files);
+    await fileProcessing.processFiles(outfiles, req, res, "epub");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting PDF to EPUB" });
+  }
+});
+
+router.post("/epub_to_pdf", upload2.array("files"), async (req, res) => {
+  try {
+    const files = req.files;
+    const outfiles = await epubToPdf(files);
+    await fileProcessing.processFiles(outfiles, req, res, "epub");
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ error: "Error converting EPUB to PDF" });
+  }
+});
+
+// ==================== BLOG ENDPOINTS ====================
 router.get("/latestBlogs", async (req, res) => {
-  Blog.find()
-    .sort({ uploadTime: -1 }) // Sort by createdAt in descending order
-    .limit(3) // Limit the results to 3 items
-    .exec((err, blogs) => {
-      if (err) {
-        res.status(400).json({ err: "not found blogs" });
-        return;
-      }
-      res.json(blogs);
-    });
+  try {
+    const blogs = await Blog.find()
+      .sort({ uploadTime: -1 })
+      .limit(3)
+      .exec();
+    res.json(blogs);
+  } catch (err) {
+    res.status(400).json({ err: "not found blogs" });
+  }
 });
 
 router.get("/allBlogs", async (req, res) => {
-  Blog.find()
-    .sort({ uploadTime: -1 }) // Sort by createdAt in descending order
-    .exec((err, blogs) => {
-      if (err) {
-        res.status(400).json({ err: "not found blogs" });
-        return;
-      }
-      res.json(blogs);
-    });
+  try {
+    const blogs = await Blog.find()
+      .sort({ uploadTime: -1 })
+      .exec();
+    res.json(blogs);
+  } catch (err) {
+    res.status(400).json({ err: "not found blogs" });
+  }
 });
 
 router.get("/blog/:url", async (req, res) => {
-  const url = req.params.url;
   try {
+    const url = req.params.url;
     const blog = await Blog.findOne({
       url: { $regex: new RegExp(url, "i") },
     });
@@ -1295,34 +770,7 @@ router.get("/blog/:url", async (req, res) => {
     res.json({ blog: blog, urls: blogs });
   } catch (err) {
     res.status(400).json({ error: [{ msg: "Server Error" }] });
-    // Handle error
   }
 });
-
-
-// Function to clean up temporary files and directories
-function cleanupTempFiles(outfiles, tempDirs, originFilePaths) {
-  console.log(tempDirs)
-  try {
-    // Remove output files
-    outfiles.forEach((file) => {
-      if (fs.existsSync(file)) fs.unlinkSync(file);
-    });
-
-    // Remove temporary directories
-    tempDirs.forEach((dir) => {
-      if (fs.existsSync(dir)) fsExtra.removeSync(dir); // Recursive deletion
-    });
-
-    originFilePaths.forEach((pdfPath) => {
-      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-    });
-
-    console.log("Temporary files and folders deleted successfully.");
-  } catch (err) {
-    console.error("Error during cleanup:", err);
-  }
-}
-
 
 module.exports = router;

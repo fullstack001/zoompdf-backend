@@ -8,8 +8,8 @@ async function deleteOldFiles() {
 
   console.log(twoHoursAgo);
   try {
-    // Find files older than two hours
-    const filesToDelete = await Pdf.find({ uploadTime: { $lt: twoHoursAgo } });
+    // Find files older than two hours without an associated user
+    const filesToDelete = await Pdf.find({ uploadTime: { $lt: twoHoursAgo }, user: { $exists: false } });
 
     filesToDelete.forEach(async (file) => {
       try {

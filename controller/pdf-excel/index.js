@@ -3,7 +3,7 @@
 const { PythonShell } = require("python-shell");
 // libre.convertAsync = require("util").promisify(libre.convert);
 
-function pdfToExcel() {
+function pdfToExcel(files) {
   return new Promise((resolve, reject) => {
     let outFiles = [];
     files.forEach(async (file) => {

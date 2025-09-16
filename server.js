@@ -43,6 +43,7 @@ app.use("/api/profile", require("./routes/api/profile"));
 app.use("/api/posts", require("./routes/api/posts"));
 app.use("/api/pdf", require("./routes/api/pdf"));
 app.use("/api/comment", require("./routes/api/comment"));
+app.use("/api/subscription", require("./routes/api/subscription"));
 
 // Serve files from the 'uploads' directory
 
@@ -121,6 +122,6 @@ function getClientsData(clientsData, socketss) {
   });
 }
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5009;
 
 server.listen(PORT, () => console.log(`Server started on port ${PORT}`));

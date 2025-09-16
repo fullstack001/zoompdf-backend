@@ -3,7 +3,6 @@ const mongoose = require("mongoose");
 const UserSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
   },
   email: {
     type: String,
@@ -12,7 +11,6 @@ const UserSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: true,
   },
   isAdmin: {
     type: Boolean,
@@ -21,6 +19,10 @@ const UserSchema = new mongoose.Schema({
   avatar: {
     type: String,
   },
+  resetToken: {
+    type: String,
+  },
+  resetTokenExpiration: Date,
   date: {
     type: Date,
     default: Date.now,
